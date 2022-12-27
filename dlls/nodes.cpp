@@ -1,20 +1,25 @@
+
 /***
-*
-*	Copyright (c) 1996-2001, Valve LLC. All rights reserved.
-*	
-*	This product contains software technology licensed from Id 
-*	Software, Inc. ("Id Technology").  Id Technology (c) 1996 Id Software, Inc. 
-*	All Rights Reserved.
-*
-*   This source code contains proprietary and confidential information of
-*   Valve LLC and its suppliers.  Access to this code is restricted to
-*   persons who have executed a written SDK license with Valve.  Any access,
-*   use or distribution of this code by or to any unlicensed person is illegal.
-*
-****/
+ *
+ *	Copyright (c) 1996-2002, Valve LLC. All rights reserved.
+ *
+ *	This product contains software technology licensed from Id
+ *	Software, Inc. ("Id Technology").  Id Technology (c) 1996 Id Software, Inc.
+ *	All Rights Reserved.
+ *
+ *   This source code contains proprietary and confidential information of
+ *   Valve LLC and its suppliers.  Access to this code is restricted to
+ *   persons who have executed a written SDK license with Valve.  Any access,
+ *   use or distribution of this code by or to any unlicensed person is illegal.
+ *
+ ****/
 //=========================================================
 // nodes.cpp - AI node tree stuff.
 //=========================================================
+
+#include <Windows.h>
+#undef ARRAYSIZE
+#undef SERVER_COMMAND
 
 #include <cassert>
 #include <limits>
@@ -27,7 +32,6 @@
 #include "nodes.h"
 #include "animation.h"
 #include "doors.h"
-#include "filesystem_utils.h"
 
 #define HULL_STEP_SIZE 16 // how far the test hull moves on each step
 #define NODE_HEIGHT 8	  // how high to lift nodes off the ground after we drop them all (make stair/ramp mapping easier)
@@ -37,26 +41,31 @@
 #define MAX_NODE_INITIAL_LINKS 128
 #define MAX_NODES 1024
 
+																																								extern DLL_GLOBAL edict_t *g_pBodyQueueHead;
+
 Vector VecBModelOrigin(entvars_t* pevBModel);
 
 CGraph WorldGraph;
 
 LINK_ENTITY_TO_CLASS(info_node, CNodeEnt);
 LINK_ENTITY_TO_CLASS(info_node_air, CNodeEnt);
-
+#ifdef __linux__
+#include <unistd.h>
+#define CreateDirectory(p, n) mkdir(p, 0777)
+#endif
 //=========================================================
 // CGraph - InitGraph - prepares the graph for use. Frees any
 // memory currently in use by the world graph, NULLs
 // all pointers, and zeros the node count.
 //=========================================================
-void CGraph::InitGraph()
+void CGraph ::InitGraph(void)
 {
 
 	// Make the graph unavailable
 	//
-	m_fGraphPresent = 0;
-	m_fGraphPointersSet = 0;
-	m_fRoutingComplete = 0;
+	m_fGraphPresent = false;
+	m_fGraphPointersSet = false;
+	m_fRoutingComplete = false;
 
 	// Free the link pool
 	//
@@ -109,15 +118,15 @@ void CGraph::InitGraph()
 // reasonable number of nodes so we can build the path which
 // will be saved to disk.
 //=========================================================
-bool CGraph::AllocNodes()
+bool CGraph ::AllocNodes(void)
 {
 	//  malloc all of the nodes
-	m_pNodes = (CNode*)calloc(sizeof(CNode), MAX_NODES);
+	WorldGraph.m_pNodes = (CNode*)calloc(sizeof(CNode), MAX_NODES);
 
 	// could not malloc space for all the nodes!
-	if (!m_pNodes)
+	if (!WorldGraph.m_pNodes)
 	{
-		ALERT(at_aiconsole, "**ERROR**\nCouldn't malloc %d nodes!\n", m_cNodes);
+		ALERT(at_aiconsole, "**ERROR**\nCouldn't malloc %d nodes!\n", WorldGraph.m_cNodes);
 		return false;
 	}
 
@@ -137,7 +146,7 @@ bool CGraph::AllocNodes()
 // pNode is the node the monster will be standing on when it
 // will need to stop and trigger the ent.
 //=========================================================
-entvars_t* CGraph::LinkEntForLink(CLink* pLink, CNode* pNode)
+entvars_t* CGraph ::LinkEntForLink(CLink* pLink, CNode* pNode)
 {
 	edict_t* pentSearch;
 	edict_t* pentTrigger;
@@ -157,12 +166,12 @@ entvars_t* CGraph::LinkEntForLink(CLink* pLink, CNode* pNode)
 		///!!!UNDONE - check for TOGGLE or STAY open doors here. If a door is in the way, and is
 		// TOGGLE or STAY OPEN, even monsters that can't open doors can go that way.
 
-		if ((pevLinkEnt->spawnflags & SF_DOOR_USE_ONLY) != 0)
+		if ((pevLinkEnt->spawnflags & SF_DOOR_USE_ONLY))
 		{ // door is use only, so the door is all the monster has to worry about
 			return pevLinkEnt;
 		}
 
-		while (true)
+		while (1)
 		{
 			pentTrigger = FIND_ENTITY_BY_TARGET(pentSearch, STRING(pevLinkEnt->targetname)); // find the button or trigger
 
@@ -206,13 +215,13 @@ entvars_t* CGraph::LinkEntForLink(CLink* pLink, CNode* pNode)
 // Given the monster's capability, determine whether
 // or not the monster can go this way.
 //=========================================================
-bool CGraph::HandleLinkEnt(int iNode, entvars_t* pevLinkEnt, int afCapMask, NODEQUERY queryType)
+bool CGraph ::HandleLinkEnt(int iNode, entvars_t* pevLinkEnt, int afCapMask, NODEQUERY queryType)
 {
 	edict_t* pentWorld;
 	CBaseEntity* pDoor;
 	TraceResult tr;
 
-	if (0 == m_fGraphPresent || 0 == m_fGraphPointersSet)
+	if (!m_fGraphPresent || !m_fGraphPointersSet)
 	{ // protect us in the case that the node graph isn't available
 		ALERT(at_aiconsole, "Graph not ready!\n");
 		return false;
@@ -231,17 +240,17 @@ bool CGraph::HandleLinkEnt(int iNode, entvars_t* pevLinkEnt, int afCapMask, NODE
 
 		pDoor = (CBaseEntity::Instance(pevLinkEnt));
 
-		if ((pevLinkEnt->spawnflags & SF_DOOR_USE_ONLY) != 0)
+		if ((pevLinkEnt->spawnflags & SF_DOOR_USE_ONLY))
 		{ // door is use only.
 
-			if ((afCapMask & bits_CAP_OPEN_DOORS) != 0)
+			if ((afCapMask & bits_CAP_OPEN_DOORS))
 			{ // let monster right through if he can open doors
 				return true;
 			}
 			else
 			{
 				// monster should try for it if the door is open and looks as if it will stay that way
-				if (pDoor->GetToggleState() == TS_AT_TOP && (pevLinkEnt->spawnflags & SF_DOOR_NO_AUTO_RETURN) != 0)
+				if (pDoor->GetToggleState() == TS_AT_TOP && (pevLinkEnt->spawnflags & SF_DOOR_NO_AUTO_RETURN))
 				{
 					return true;
 				}
@@ -253,13 +262,13 @@ bool CGraph::HandleLinkEnt(int iNode, entvars_t* pevLinkEnt, int afCapMask, NODE
 		{ // door must be opened with a button or trigger field.
 
 			// monster should try for it if the door is open and looks as if it will stay that way
-			if (pDoor->GetToggleState() == TS_AT_TOP && (pevLinkEnt->spawnflags & SF_DOOR_NO_AUTO_RETURN) != 0)
+			if (pDoor->GetToggleState() == TS_AT_TOP && (pevLinkEnt->spawnflags & SF_DOOR_NO_AUTO_RETURN))
 			{
 				return true;
 			}
-			if ((afCapMask & bits_CAP_OPEN_DOORS) != 0)
+			if ((afCapMask & bits_CAP_OPEN_DOORS))
 			{
-				if ((pevLinkEnt->spawnflags & SF_DOOR_NOMONSTERS) == 0 || queryType == NODEGRAPH_STATIC)
+				if (!(pevLinkEnt->spawnflags & SF_DOOR_NOMONSTERS) || queryType == NODEGRAPH_STATIC)
 					return true;
 			}
 
@@ -288,7 +297,7 @@ bool CGraph::HandleLinkEnt(int iNode, entvars_t* pevLinkEnt, int afCapMask, NODE
 // into the passed int pointer, and a bool telling whether or 
 // not the point is along the line into the passed bool pointer.
 //=========================================================
-int	CGraph:: FindNearestLink ( const Vector &vecTestPoint, int *piNearestLink, bool *pfAlongLine )
+int	CGraph :: FindNearestLink ( const Vector &vecTestPoint, int *piNearestLink, bool *pfAlongLine )
 {
 	int			i, j;// loops
 	
@@ -488,7 +497,7 @@ float CGraph::PathLength(int iStart, int iDest, int iHull, int afCapMask)
 		iNext = NextNodeInRoute(iCurrentNode, iDest, iHull, iCap);
 		if (iCurrentNode == iNext)
 		{
-			//ALERT(at_aiconsole, "SVD: Can't get there from here..\n");
+			// ALERT(at_aiconsole, "SVD: Can't get there from here..\n");
 			return 0;
 		}
 
@@ -521,7 +530,7 @@ int CGraph::NextNodeInRoute(int iCurrentNode, int iDest, int iHull, int iCap)
 	while (nCount > 0)
 	{
 		char ch = *pRoute++;
-		//ALERT(at_aiconsole, "C(%d)", ch);
+		// ALERT(at_aiconsole, "C(%d)", ch);
 		if (ch < 0)
 		{
 			// Sequence phrase
@@ -531,17 +540,17 @@ int CGraph::NextNodeInRoute(int iCurrentNode, int iDest, int iHull, int iCap)
 			{
 				iNext = iDest;
 				nCount = 0;
-				//ALERT(at_aiconsole, "SEQ: iNext/iDest=%d\n", iNext);
+				// ALERT(at_aiconsole, "SEQ: iNext/iDest=%d\n", iNext);
 			}
 			else
 			{
-				//ALERT(at_aiconsole, "SEQ: nCount + ch (%d + %d)\n", nCount, ch);
+				// ALERT(at_aiconsole, "SEQ: nCount + ch (%d + %d)\n", nCount, ch);
 				nCount = nCount - ch;
 			}
 		}
 		else
 		{
-			//ALERT(at_aiconsole, "C(%d)", *pRoute);
+			// ALERT(at_aiconsole, "C(%d)", *pRoute);
 
 			// Repeat phrase
 			//
@@ -553,11 +562,11 @@ int CGraph::NextNodeInRoute(int iCurrentNode, int iDest, int iHull, int iCap)
 				else if (iNext < 0)
 					iNext += m_cNodes;
 				nCount = 0;
-				//ALERT(at_aiconsole, "REP: iNext=%d\n", iNext);
+				// ALERT(at_aiconsole, "REP: iNext=%d\n", iNext);
 			}
 			else
 			{
-				//ALERT(at_aiconsole, "REP: nCount - ch+1 (%d - %d+1)\n", nCount, ch);
+				// ALERT(at_aiconsole, "REP: nCount - ch+1 (%d - %d+1)\n", nCount, ch);
 				nCount = nCount - ch - 1;
 			}
 			pRoute++;
@@ -575,23 +584,23 @@ int CGraph::NextNodeInRoute(int iCurrentNode, int iDest, int iHull, int iCap)
 // find a path usable by a monster with those capabilities
 // returns the number of nodes copied into supplied array
 //=========================================================
-int CGraph::FindShortestPath(int* piPath, int iStart, int iDest, int iHull, int afCapMask)
+int CGraph ::FindShortestPath(int* piPath, int iStart, int iDest, int iHull, int afCapMask)
 {
 	int iVisitNode;
 	int iCurrentNode;
 	int iNumPathNodes;
 	int iHullMask;
 
-	if (0 == m_fGraphPresent || 0 == m_fGraphPointersSet)
+	if (!m_fGraphPresent || !m_fGraphPointersSet)
 	{ // protect us in the case that the node graph isn't available or built
 		ALERT(at_aiconsole, "Graph not ready!\n");
-		return 0;
+		return false;
 	}
 
 	if (iStart < 0 || iStart > m_cNodes)
 	{ // The start node is bad?
 		ALERT(at_aiconsole, "Can't build a path, iStart is %d!\n", iStart);
-		return 0;
+		return false;
 	}
 
 	if (iStart == iDest)
@@ -603,7 +612,7 @@ int CGraph::FindShortestPath(int* piPath, int iStart, int iDest, int iHull, int 
 
 	// Is routing information present.
 	//
-	if (0 != m_fRoutingComplete)
+	if (m_fRoutingComplete)
 	{
 		int iCap = CapIndex(afCapMask);
 
@@ -612,7 +621,7 @@ int CGraph::FindShortestPath(int* piPath, int iStart, int iDest, int iHull, int 
 		iCurrentNode = iStart;
 		int iNext;
 
-		//ALERT(at_aiconsole, "GOAL: %d to %d\n", iStart, iDest);
+		// ALERT(at_aiconsole, "GOAL: %d to %d\n", iStart, iDest);
 
 		// Until we arrive at the destination
 		//
@@ -621,19 +630,19 @@ int CGraph::FindShortestPath(int* piPath, int iStart, int iDest, int iHull, int 
 			iNext = NextNodeInRoute(iCurrentNode, iDest, iHull, iCap);
 			if (iCurrentNode == iNext)
 			{
-				//ALERT(at_aiconsole, "SVD: Can't get there from here..\n");
+				// ALERT(at_aiconsole, "SVD: Can't get there from here..\n");
 				return 0;
 				break;
 			}
 			if (iNumPathNodes >= MAX_PATH_SIZE)
 			{
-				//ALERT(at_aiconsole, "SVD: Don't return the entire path.\n");
+				// ALERT(at_aiconsole, "SVD: Don't return the entire path.\n");
 				break;
 			}
 			piPath[iNumPathNodes++] = iNext;
 			iCurrentNode = iNext;
 		}
-		//ALERT( at_aiconsole, "SVD: Path with %d nodes.\n", iNumPathNodes);
+		// ALERT( at_aiconsole, "SVD: Path with %d nodes.\n", iNumPathNodes);
 	}
 	else
 	{
@@ -657,8 +666,7 @@ int CGraph::FindShortestPath(int* piPath, int iStart, int iDest, int iHull, int 
 
 		// Mark all the nodes as unvisited.
 		//
-		int i;
-		for (i = 0; i < m_cNodes; i++)
+		for (int i = 0; i < m_cNodes; i++)
 		{
 			m_pNodes[i].m_flClosestSoFar = -1.0;
 		}
@@ -681,13 +689,13 @@ int CGraph::FindShortestPath(int* piPath, int iStart, int iDest, int iHull, int 
 
 			CNode* pCurrentNode = &m_pNodes[iCurrentNode];
 
-			for (i = 0; i < pCurrentNode->m_cNumLinks; i++)
+			for (int i = 0; i < pCurrentNode->m_cNumLinks; i++)
 			{ // run through all of this node's neighbors
 
 				iVisitNode = INodeLink(iCurrentNode, i);
 				if ((m_pLinkPool[m_pNodes[iCurrentNode].m_iFirstLink + i].m_afLinkInfo & iHullMask) != iHullMask)
 				{ // monster is too large to walk this connection
-					//ALERT ( at_aiconsole, "fat ass %d/%d\n",m_pLinkPool[ m_pNodes[ iCurrentNode ].m_iFirstLink + i ].m_afLinkInfo, iMonsterHull );
+					// ALERT ( at_aiconsole, "fat ass %d/%d\n",m_pLinkPool[ m_pNodes[ iCurrentNode ].m_iFirstLink + i ].m_afLinkInfo, iMonsterHull );
 					continue;
 				}
 				// check the connection from the current node to the node we're about to mark visited and push into the queue
@@ -727,7 +735,7 @@ int CGraph::FindShortestPath(int* piPath, int iStart, int iDest, int iHull, int 
 		}
 
 		iCurrentNode = iDest;
-		for (i = iNumPathNodes - 1; i >= 0; i--)
+		for (int i = iNumPathNodes - 1; i >= 0; i--)
 		{
 			piPath[i] = iCurrentNode;
 			iCurrentNode = m_pNodes[iCurrentNode].m_iPreviousNode;
@@ -774,7 +782,7 @@ int CGraph::FindShortestPath(int* piPath, int iStart, int iDest, int iHull, int 
 	return iNumPathNodes;
 }
 
-inline unsigned int Hash(void* p, int len)
+inline unsigned long Hash(void* p, int len)
 {
 	CRC32_t ulCrc;
 	CRC32_INIT(&ulCrc);
@@ -815,7 +823,7 @@ void inline UpdateRange(int& minValue, int& maxValue, int Goal, int Best)
 		minValue = Lower;
 }
 
-void CGraph::CheckNode(Vector vecOrigin, int iNode)
+void CGraph ::CheckNode(Vector vecOrigin, int iNode)
 {
 	// Have we already seen this point before?.
 	//
@@ -859,17 +867,17 @@ void CGraph::CheckNode(Vector vecOrigin, int iNode)
 // the given vector -1 is failure (couldn't find a valid
 // near node )
 //=========================================================
-int CGraph::FindNearestNode(const Vector& vecOrigin, CBaseEntity* pEntity)
+int CGraph ::FindNearestNode(const Vector& vecOrigin, CBaseEntity* pEntity)
 {
 	return FindNearestNode(vecOrigin, NodeType(pEntity));
 }
 
-int CGraph::FindNearestNode(const Vector& vecOrigin, int afNodeTypes)
+int CGraph ::FindNearestNode(const Vector& vecOrigin, int afNodeTypes)
 {
 	int i;
 	TraceResult tr;
 
-	if (0 == m_fGraphPresent || 0 == m_fGraphPointersSet)
+	if (!m_fGraphPresent || !m_fGraphPointersSet)
 	{ // protect us in the case that the node graph isn't available
 		ALERT(at_aiconsole, "Graph not ready!\n");
 		return -1;
@@ -877,15 +885,15 @@ int CGraph::FindNearestNode(const Vector& vecOrigin, int afNodeTypes)
 
 	// Check with the cache
 	//
-	unsigned int iHash = (CACHE_SIZE - 1) & Hash((void*)(const float*)vecOrigin, sizeof(vecOrigin));
+	unsigned long iHash = (CACHE_SIZE - 1) & Hash((void*)(const float*)vecOrigin, sizeof(vecOrigin));
 	if (m_Cache[iHash].v == vecOrigin)
 	{
-		//ALERT(at_aiconsole, "Cache Hit.\n");
+		// ALERT(at_aiconsole, "Cache Hit.\n");
 		return m_Cache[iHash].n;
 	}
 	else
 	{
-		//ALERT(at_aiconsole, "Cache Miss.\n");
+		// ALERT(at_aiconsole, "Cache Miss.\n");
 	}
 
 	// Mark all points as unchecked.
@@ -941,7 +949,7 @@ int CGraph::FindNearestNode(const Vector& vecOrigin, int afNodeTypes)
 	{
 		for (j = m_RangeStart[0][i]; j <= m_RangeEnd[0][i]; j++)
 		{
-			if ((m_pNodes[m_di[j].m_SortedBy[0]].m_afNodeInfo & afNodeTypes) == 0)
+			if (!(m_pNodes[m_di[j].m_SortedBy[0]].m_afNodeInfo & afNodeTypes))
 				continue;
 
 			int rgY = m_pNodes[m_di[j].m_SortedBy[0]].m_Region[1];
@@ -963,7 +971,7 @@ int CGraph::FindNearestNode(const Vector& vecOrigin, int afNodeTypes)
 	{
 		for (j = m_RangeStart[1][i]; j <= m_RangeEnd[1][i]; j++)
 		{
-			if ((m_pNodes[m_di[j].m_SortedBy[1]].m_afNodeInfo & afNodeTypes) == 0)
+			if (!(m_pNodes[m_di[j].m_SortedBy[1]].m_afNodeInfo & afNodeTypes))
 				continue;
 
 			int rgZ = m_pNodes[m_di[j].m_SortedBy[1]].m_Region[2];
@@ -984,7 +992,7 @@ int CGraph::FindNearestNode(const Vector& vecOrigin, int afNodeTypes)
 	{
 		for (j = m_RangeStart[2][i]; j <= m_RangeEnd[2][i]; j++)
 		{
-			if ((m_pNodes[m_di[j].m_SortedBy[2]].m_afNodeInfo & afNodeTypes) == 0)
+			if (!(m_pNodes[m_di[j].m_SortedBy[2]].m_afNodeInfo & afNodeTypes))
 				continue;
 
 			int rgX = m_pNodes[m_di[j].m_SortedBy[2]].m_Region[0];
@@ -1005,7 +1013,7 @@ int CGraph::FindNearestNode(const Vector& vecOrigin, int afNodeTypes)
 	{
 		for (j = m_RangeStart[0][i]; j <= m_RangeEnd[0][i]; j++)
 		{
-			if ((m_pNodes[m_di[j].m_SortedBy[0]].m_afNodeInfo & afNodeTypes) == 0)
+			if (!(m_pNodes[m_di[j].m_SortedBy[0]].m_afNodeInfo & afNodeTypes))
 				continue;
 
 			int rgY = m_pNodes[m_di[j].m_SortedBy[0]].m_Region[1];
@@ -1027,7 +1035,7 @@ int CGraph::FindNearestNode(const Vector& vecOrigin, int afNodeTypes)
 	{
 		for (j = m_RangeStart[1][i]; j <= m_RangeEnd[1][i]; j++)
 		{
-			if ((m_pNodes[m_di[j].m_SortedBy[1]].m_afNodeInfo & afNodeTypes) == 0)
+			if (!(m_pNodes[m_di[j].m_SortedBy[1]].m_afNodeInfo & afNodeTypes))
 				continue;
 
 			int rgZ = m_pNodes[m_di[j].m_SortedBy[1]].m_Region[2];
@@ -1048,7 +1056,7 @@ int CGraph::FindNearestNode(const Vector& vecOrigin, int afNodeTypes)
 	{
 		for (j = m_RangeStart[2][i]; j <= m_RangeEnd[2][i]; j++)
 		{
-			if ((m_pNodes[m_di[j].m_SortedBy[2]].m_afNodeInfo & afNodeTypes) == 0)
+			if (!(m_pNodes[m_di[j].m_SortedBy[2]].m_afNodeInfo & afNodeTypes))
 				continue;
 
 			int rgX = m_pNodes[m_di[j].m_SortedBy[2]].m_Region[0];
@@ -1114,14 +1122,14 @@ int CGraph::FindNearestNode(const Vector& vecOrigin, int afNodeTypes)
 // CGraph - ShowNodeConnections - draws a line from the given node
 // to all connected nodes
 //=========================================================
-void CGraph::ShowNodeConnections(int iNode)
+void CGraph ::ShowNodeConnections(int iNode)
 {
 	Vector vecSpot;
 	CNode* pNode;
 	CNode* pLinkNode;
 	int i;
 
-	if (0 == m_fGraphPresent || 0 == m_fGraphPointersSet)
+	if (!m_fGraphPresent || !m_fGraphPointersSet)
 	{ // protect us in the case that the node graph isn't available or built
 		ALERT(at_aiconsole, "Graph not ready!\n");
 		return;
@@ -1173,7 +1181,7 @@ void CGraph::ShowNodeConnections(int iNode)
 // If there's a problem with this process, the index
 // of the offending node will be written to piBadNode
 //=========================================================
-int CGraph::LinkVisibleNodes(CLink* pLinkPool, FSFile& file, int* piBadNode)
+int CGraph ::LinkVisibleNodes(CLink* pLinkPool, FILE* file, int* piBadNode)
 {
 	int i, j, z;
 	edict_t* pTraceEnt;
@@ -1190,7 +1198,7 @@ int CGraph::LinkVisibleNodes(CLink* pLinkPool, FSFile& file, int* piBadNode)
 	if (m_cNodes <= 0)
 	{
 		ALERT(at_aiconsole, "No Nodes!\n");
-		return 0;
+		return false;
 	}
 
 	// if the file pointer is bad, don't blow up, just don't write the
@@ -1201,9 +1209,9 @@ int CGraph::LinkVisibleNodes(CLink* pLinkPool, FSFile& file, int* piBadNode)
 	}
 	else
 	{
-		file.Printf("----------------------------------------------------------------------------\n");
-		file.Printf("LinkVisibleNodes - Initial Connections\n");
-		file.Printf("----------------------------------------------------------------------------\n");
+		fprintf(file, "----------------------------------------------------------------------------\n");
+		fprintf(file, "LinkVisibleNodes - Initial Connections\n");
+		fprintf(file, "----------------------------------------------------------------------------\n");
 	}
 
 	cTotalLinks = 0; // start with no connections
@@ -1219,7 +1227,7 @@ int CGraph::LinkVisibleNodes(CLink* pLinkPool, FSFile& file, int* piBadNode)
 
 		if (file)
 		{
-			file.Printf("Node #%4d:\n\n", i);
+			fprintf(file, "Node #%4d:\n\n", i);
 		}
 
 		for (z = 0; z < MAX_NODE_INITIAL_LINKS; z++)
@@ -1264,7 +1272,7 @@ int CGraph::LinkVisibleNodes(CLink* pLinkPool, FSFile& file, int* piBadNode)
 				&tr);
 
 
-			if (0 != tr.fStartSolid)
+			if (tr.fStartSolid)
 				continue;
 
 			if (tr.flFraction != 1.0)
@@ -1307,14 +1315,14 @@ int CGraph::LinkVisibleNodes(CLink* pLinkPool, FSFile& file, int* piBadNode)
 
 			if (file)
 			{
-				file.Printf("%4d", j);
+				fprintf(file, "%4d", j);
 
 				if (!FNullEnt(pLinkPool[cTotalLinks].m_pLinkEnt))
 				{ // record info about the ent in the way, if any.
-					file.Printf("  Entity on connection: %s, name: %s  Model: %s", STRING(VARS(pTraceEnt)->classname), STRING(VARS(pTraceEnt)->targetname), STRING(VARS(tr.pHit)->model));
+					fprintf(file, "  Entity on connection: %s, name: %s  Model: %s", STRING(VARS(pTraceEnt)->classname), STRING(VARS(pTraceEnt)->targetname), STRING(VARS(tr.pHit)->model));
 				}
 
-				file.Printf("\n");
+				fprintf(file, "\n");
 			}
 
 			pLinkPool[cTotalLinks].m_iDestNode = j;
@@ -1326,24 +1334,24 @@ int CGraph::LinkVisibleNodes(CLink* pLinkPool, FSFile& file, int* piBadNode)
 			if (cLinksThisNode == MAX_NODE_INITIAL_LINKS)
 			{
 				ALERT(at_aiconsole, "**LinkVisibleNodes:\nNode %d has NodeLinks > MAX_NODE_INITIAL_LINKS", i);
-				file.Printf("** NODE %d HAS NodeLinks > MAX_NODE_INITIAL_LINKS **\n", i);
+				fprintf(file, "** NODE %d HAS NodeLinks > MAX_NODE_INITIAL_LINKS **\n", i);
 				*piBadNode = i;
-				return 0;
+				return false;
 			}
 			else if (cTotalLinks > MAX_NODE_INITIAL_LINKS * m_cNodes)
 			{ // this is paranoia
 				ALERT(at_aiconsole, "**LinkVisibleNodes:\nTotalLinks > MAX_NODE_INITIAL_LINKS * NUMNODES");
 				*piBadNode = i;
-				return 0;
+				return false;
 			}
 
 			if (cLinksThisNode == 0)
 			{
-				file.Printf("**NO INITIAL LINKS**\n");
+				fprintf(file, "**NO INITIAL LINKS**\n");
 			}
 
 			// record the connection info in the link pool
-			m_pNodes[i].m_cNumLinks = cLinksThisNode;
+			WorldGraph.m_pNodes[i].m_cNumLinks = cLinksThisNode;
 
 			// keep track of the most initial links ANY node had, so we can figure out
 			// if we have a large enough default link pool
@@ -1356,12 +1364,12 @@ int CGraph::LinkVisibleNodes(CLink* pLinkPool, FSFile& file, int* piBadNode)
 
 		if (file)
 		{
-			file.Printf("----------------------------------------------------------------------------\n");
+			fprintf(file, "----------------------------------------------------------------------------\n");
 		}
 	}
 
-	file.Printf("\n%4d Total Initial Connections - %4d Maximum connections for a single node.\n", cTotalLinks, cMaxInitialLinks);
-	file.Printf("----------------------------------------------------------------------------\n\n\n");
+	fprintf(file, "\n%4d Total Initial Connections - %4d Maximum connections for a single node.\n", cTotalLinks, cMaxInitialLinks);
+	fprintf(file, "----------------------------------------------------------------------------\n\n\n");
 
 	return cTotalLinks;
 }
@@ -1372,7 +1380,7 @@ int CGraph::LinkVisibleNodes(CLink* pLinkPool, FSFile& file, int* piBadNode)
 // want status reports written to disk ). RETURNS the number
 // of connections that were rejected
 //=========================================================
-int CGraph::RejectInlineLinks(CLink* pLinkPool, FSFile& file)
+int CGraph ::RejectInlineLinks(CLink* pLinkPool, FILE* file)
 {
 	int i, j, k;
 
@@ -1390,9 +1398,9 @@ int CGraph::RejectInlineLinks(CLink* pLinkPool, FSFile& file)
 
 	if (file)
 	{
-		file.Printf("----------------------------------------------------------------------------\n");
-		file.Printf("InLine Rejection:\n");
-		file.Printf("----------------------------------------------------------------------------\n");
+		fprintf(file, "----------------------------------------------------------------------------\n");
+		fprintf(file, "InLine Rejection:\n");
+		fprintf(file, "----------------------------------------------------------------------------\n");
 	}
 
 	cRejectedLinks = 0;
@@ -1403,7 +1411,7 @@ int CGraph::RejectInlineLinks(CLink* pLinkPool, FSFile& file)
 
 		if (file)
 		{
-			file.Printf("Node %3d:\n", i);
+			fprintf(file, "Node %3d:\n", i);
 		}
 
 		for (j = 0; j < pSrcNode->m_cNumLinks; j++)
@@ -1438,7 +1446,7 @@ int CGraph::RejectInlineLinks(CLink* pLinkPool, FSFile& file)
 					{
 						if (file)
 						{
-							file.Printf("REJECTED NODE %3d through Node %3d, Dot = %8f\n", pLinkPool[pSrcNode->m_iFirstLink + j].m_iDestNode, pLinkPool[pSrcNode->m_iFirstLink + k].m_iDestNode, DotProduct(vec2DirToCheckNode, vec2DirToTestNode));
+							fprintf(file, "REJECTED NODE %3d through Node %3d, Dot = %8f\n", pLinkPool[pSrcNode->m_iFirstLink + j].m_iDestNode, pLinkPool[pSrcNode->m_iFirstLink + k].m_iDestNode, DotProduct(vec2DirToCheckNode, vec2DirToTestNode));
 						}
 
 						pLinkPool[pSrcNode->m_iFirstLink + j] = pLinkPool[pSrcNode->m_iFirstLink + (pSrcNode->m_cNumLinks - 1)];
@@ -1455,7 +1463,7 @@ int CGraph::RejectInlineLinks(CLink* pLinkPool, FSFile& file)
 
 		if (file)
 		{
-			file.Printf("----------------------------------------------------------------------------\n\n");
+			fprintf(file, "----------------------------------------------------------------------------\n\n");
 		}
 	}
 
@@ -1471,12 +1479,12 @@ class CTestHull : public CBaseMonster
 
 public:
 	void Spawn(entvars_t* pevMasterNode);
-	int ObjectCaps() override { return CBaseMonster::ObjectCaps() & ~FCAP_ACROSS_TRANSITION; }
-	void EXPORT CallBuildNodeGraph();
-	void BuildNodeGraph();
-	void EXPORT ShowBadNode();
-	void EXPORT DropDelay();
-	void EXPORT PathFind();
+	virtual int ObjectCaps() override { return CBaseMonster ::ObjectCaps() & ~FCAP_ACROSS_TRANSITION; }
+	void EXPORT CallBuildNodeGraph(void);
+	void BuildNodeGraph(void);
+	void EXPORT ShowBadNode(void);
+	void EXPORT DropDelay(void);
+	void EXPORT PathFind(void);
 
 	Vector vecBadNodeOrigin;
 };
@@ -1486,7 +1494,7 @@ LINK_ENTITY_TO_CLASS(testhull, CTestHull);
 //=========================================================
 // CTestHull::Spawn
 //=========================================================
-void CTestHull::Spawn(entvars_t* pevMasterNode)
+void CTestHull ::Spawn(entvars_t* pevMasterNode)
 {
 	SET_MODEL(ENT(pev), "models/player.mdl");
 	UTIL_SetSize(pev, VEC_HUMAN_HULL_MIN, VEC_HUMAN_HULL_MAX);
@@ -1497,9 +1505,9 @@ void CTestHull::Spawn(entvars_t* pevMasterNode)
 	pev->health = 50;
 	pev->yaw_speed = 8;
 
-	if (0 != WorldGraph.m_fGraphPresent)
+	if (WorldGraph.m_fGraphPresent)
 	{ // graph loaded from disk, so we don't need the test hull
-		SetThink(&CTestHull::SUB_Remove);
+		SetThink(&CBaseEntity::SUB_Remove);
 		pev->nextthink = gpGlobals->time;
 	}
 	else
@@ -1518,9 +1526,9 @@ void CTestHull::Spawn(entvars_t* pevMasterNode)
 // TestHull::DropDelay - spawns TestHull on top of
 // the 0th node and drops it to the ground.
 //=========================================================
-void CTestHull::DropDelay()
+void CTestHull::DropDelay(void)
 {
-	//	UTIL_CenterPrintAll( "Node Graph out of Date. Rebuilding..." );
+	UTIL_CenterPrintAll("Node Graph out of Date. Rebuilding...");
 
 	UTIL_SetOrigin(pev, WorldGraph.m_pNodes[0].m_vecOrigin);
 
@@ -1533,7 +1541,7 @@ void CTestHull::DropDelay()
 // nodes start out as ents in the world. As they are spawned,
 // the node info is recorded then the ents are discarded.
 //=========================================================
-bool CNodeEnt::KeyValue(KeyValueData* pkvd)
+bool CNodeEnt ::KeyValue(KeyValueData* pkvd)
 {
 	if (FStrEq(pkvd->szKeyName, "hinttype"))
 	{
@@ -1546,18 +1554,18 @@ bool CNodeEnt::KeyValue(KeyValueData* pkvd)
 		m_sHintActivity = (short)atoi(pkvd->szValue);
 		return true;
 	}
-
+	
 	return CBaseEntity::KeyValue(pkvd);
 }
 
 //=========================================================
 //=========================================================
-void CNodeEnt::Spawn()
+void CNodeEnt ::Spawn(void)
 {
 	pev->movetype = MOVETYPE_NONE;
 	pev->solid = SOLID_NOT; // always solid_not
 
-	if (0 != WorldGraph.m_fGraphPresent)
+	if (WorldGraph.m_fGraphPresent)
 	{ // graph loaded from disk, so discard all these node ents as soon as they spawn
 		REMOVE_ENTITY(edict());
 		return;
@@ -1597,7 +1605,7 @@ void CNodeEnt::Spawn()
 // hull will be placed up the bad node's location and will generate
 // particles
 //=========================================================
-void CTestHull::ShowBadNode()
+void CTestHull ::ShowBadNode(void)
 {
 	pev->movetype = MOVETYPE_FLY;
 	pev->angles.y = pev->angles.y + 4;
@@ -1613,7 +1621,8 @@ void CTestHull::ShowBadNode()
 	pev->nextthink = gpGlobals->time + 0.1;
 }
 
-void CTestHull::CallBuildNodeGraph()
+extern bool gTouchDisabled;
+void CTestHull::CallBuildNodeGraph(void)
 {
 	// TOUCH HACK -- Don't allow this entity to call anyone's "touch" function
 	gTouchDisabled = true;
@@ -1630,16 +1639,19 @@ void CTestHull::CallBuildNodeGraph()
 // hull that walks between each node and each of its links
 // to ensure that a monster can actually fit through the space
 //=========================================================
-void CTestHull::BuildNodeGraph()
+void CTestHull ::BuildNodeGraph(void)
 {
 	TraceResult tr;
+	FILE* file;
+
+	char szNrpFilename[MAX_PATH]; // text node report filename
 
 	CLink* pTempPool; // temporary link pool
 
 	CNode* pSrcNode;  // node we're currently working with
 	CNode* pDestNode; // the other node in comparison operations
 
-	bool fSkipRemainingHulls; //if smallest hull can't fit, don't check any others
+	bool fSkipRemainingHulls; // if smallest hull can't fit, don't check any others
 	bool fPairsValid;		  // are all links in the graph evenly paired?
 
 	int i, j, hull;
@@ -1668,7 +1680,7 @@ void CTestHull::BuildNodeGraph()
 	float flDist;
 	int step;
 
-	SetThink(&CTestHull::SUB_Remove); // no matter what happens, the hull gets rid of itself.
+	SetThink(&CBaseEntity::SUB_Remove); // no matter what happens, the hull gets rid of itself.
 	pev->nextthink = gpGlobals->time;
 
 	// 	malloc a swollen temporary connection pool that we trim down after we know exactly how many connections there are.
@@ -1679,16 +1691,23 @@ void CTestHull::BuildNodeGraph()
 		return;
 	}
 
+
 	// make sure directories have been made
-	g_pFileSystem->CreateDirHierarchy("maps/graphs", "GAMECONFIG");
+	GET_GAME_DIR(szNrpFilename);
+	strcat(szNrpFilename, "/maps");
+	CreateDirectory(szNrpFilename, NULL);
+	strcat(szNrpFilename, "/graphs");
+	CreateDirectory(szNrpFilename, NULL);
 
-	const std::string nrpFileName{std::string{"maps/graphs/"} + STRING(gpGlobals->mapname) + ".nrp"};
+	strcat(szNrpFilename, "/");
+	strcat(szNrpFilename, STRING(gpGlobals->mapname));
+	strcat(szNrpFilename, ".nrp");
 
-	FSFile file{nrpFileName.c_str(), "w+", "GAMECONFIG"};
+	file = fopen(szNrpFilename, "w+");
 
 	if (!file)
 	{ // file error
-		ALERT(at_aiconsole, "Couldn't create %s!\n", nrpFileName.c_str());
+		ALERT(at_aiconsole, "Couldn't create %s!\n", szNrpFilename);
 
 		if (pTempPool)
 		{
@@ -1698,8 +1717,8 @@ void CTestHull::BuildNodeGraph()
 		return;
 	}
 
-	file.Printf("Node Graph Report for map:  %s.bsp\n", STRING(gpGlobals->mapname));
-	file.Printf("%d Total Nodes\n\n", WorldGraph.m_cNodes);
+	fprintf(file, "Node Graph Report for map:  %s.bsp\n", STRING(gpGlobals->mapname));
+	fprintf(file, "%d Total Nodes\n\n", WorldGraph.m_cNodes);
 
 	for (i = 0; i < WorldGraph.m_cNodes; i++)
 	{ // print all node numbers and their locations to the file.
@@ -1707,21 +1726,21 @@ void CTestHull::BuildNodeGraph()
 		WorldGraph.m_pNodes[i].m_iFirstLink = 0;
 		memset(WorldGraph.m_pNodes[i].m_pNextBestNode, 0, sizeof(WorldGraph.m_pNodes[i].m_pNextBestNode));
 
-		file.Printf("Node#         %4d\n", i);
-		file.Printf("Location      %4d,%4d,%4d\n", (int)WorldGraph.m_pNodes[i].m_vecOrigin.x, (int)WorldGraph.m_pNodes[i].m_vecOrigin.y, (int)WorldGraph.m_pNodes[i].m_vecOrigin.z);
-		file.Printf("HintType:     %4d\n", WorldGraph.m_pNodes[i].m_sHintType);
-		file.Printf("HintActivity: %4d\n", WorldGraph.m_pNodes[i].m_sHintActivity);
-		file.Printf("HintYaw:      %4f\n", WorldGraph.m_pNodes[i].m_flHintYaw);
-		file.Printf("-------------------------------------------------------------------------------\n");
+		fprintf(file, "Node#         %4d\n", i);
+		fprintf(file, "Location      %4d,%4d,%4d\n", (int)WorldGraph.m_pNodes[i].m_vecOrigin.x, (int)WorldGraph.m_pNodes[i].m_vecOrigin.y, (int)WorldGraph.m_pNodes[i].m_vecOrigin.z);
+		fprintf(file, "HintType:     %4d\n", WorldGraph.m_pNodes[i].m_sHintType);
+		fprintf(file, "HintActivity: %4d\n", WorldGraph.m_pNodes[i].m_sHintActivity);
+		fprintf(file, "HintYaw:      %4f\n", WorldGraph.m_pNodes[i].m_flHintYaw);
+		fprintf(file, "-------------------------------------------------------------------------------\n");
 	}
-	file.Printf("\n\n");
+	fprintf(file, "\n\n");
 
 
 	// Automatically recognize WATER nodes and drop the LAND nodes to the floor.
 	//
 	for (i = 0; i < WorldGraph.m_cNodes; i++)
 	{
-		if ((WorldGraph.m_pNodes[i].m_afNodeInfo & bits_NODE_AIR) != 0)
+		if (WorldGraph.m_pNodes[i].m_afNodeInfo & bits_NODE_AIR)
 		{
 			// do nothing
 		}
@@ -1758,7 +1777,7 @@ void CTestHull::BuildNodeGraph()
 			if (trEnt.flFraction < tr.flFraction)
 			{
 				// If it was a world brush entity, copy the node location
-				if (trEnt.pHit && (trEnt.pHit->v.flags & FL_WORLDBRUSH) != 0)
+				if (trEnt.pHit && (trEnt.pHit->v.flags & FL_WORLDBRUSH))
 					tr.vecEndPos = trEnt.vecEndPos;
 			}
 
@@ -1769,12 +1788,12 @@ void CTestHull::BuildNodeGraph()
 
 	cPoolLinks = WorldGraph.LinkVisibleNodes(pTempPool, file, &iBadNode);
 
-	if (0 == cPoolLinks)
+	if (!cPoolLinks)
 	{
 		ALERT(at_aiconsole, "**ConnectVisibleNodes FAILED!\n");
 
 		SetThink(&CTestHull::ShowBadNode); // send the hull off to show the offending node.
-		//pev->solid = SOLID_NOT;
+		// pev->solid = SOLID_NOT;
 		pev->origin = WorldGraph.m_pNodes[iBadNode].m_vecOrigin;
 
 		if (pTempPool)
@@ -1782,20 +1801,25 @@ void CTestHull::BuildNodeGraph()
 			free(pTempPool);
 		}
 
+		if (file)
+		{ // close the file
+			fclose(file);
+		}
+
 		return;
 	}
 
 	// send the walkhull to all of this node's connections now. We'll do this here since
 	// so much of it relies on being able to control the test hull.
-	file.Printf("----------------------------------------------------------------------------\n");
-	file.Printf("Walk Rejection:\n");
+	fprintf(file, "----------------------------------------------------------------------------\n");
+	fprintf(file, "Walk Rejection:\n");
 
 	for (i = 0; i < WorldGraph.m_cNodes; i++)
 	{
 		pSrcNode = &WorldGraph.m_pNodes[i];
 
-		file.Printf("-------------------------------------------------------------------------------\n");
-		file.Printf("Node %4d:\n\n", i);
+		fprintf(file, "-------------------------------------------------------------------------------\n");
+		fprintf(file, "Node %4d:\n\n", i);
 
 		for (j = 0; j < pSrcNode->m_cNumLinks; j++)
 		{
@@ -1846,19 +1870,23 @@ void CTestHull::BuildNodeGraph()
 						free(pTempPool);
 					}
 
+					if (file)
+					{ // close the file
+						fclose(file);
+					}
 					return;
 				}
 
 				pDestNode = &WorldGraph.m_pNodes[pTempPool[pSrcNode->m_iFirstLink + j].m_iDestNode];
 
 				vecSpot = pDestNode->m_vecOrigin;
-				//vecSpot.z = pev->origin.z;
+				// vecSpot.z = pev->origin.z;
 
 				if (hull < NODE_FLY_HULL)
 				{
 					int SaveFlags = pev->flags;
 					int MoveMode = WALKMOVE_WORLDONLY;
-					if ((pSrcNode->m_afNodeInfo & bits_NODE_WATER) != 0)
+					if (pSrcNode->m_afNodeInfo & bits_NODE_WATER)
 					{
 						pev->flags |= FL_SWIM;
 						MoveMode = WALKMOVE_NORMAL;
@@ -1868,7 +1896,7 @@ void CTestHull::BuildNodeGraph()
 
 					flDist = (vecSpot - pev->origin).Length2D();
 
-					bool fWalkFailed = false;
+					int fWalkFailed = false;
 
 					// in this loop we take tiny steps from the current node to the nodes that it links to, one at a time.
 					// pev->angles.y = flYaw;
@@ -1897,23 +1925,23 @@ void CTestHull::BuildNodeGraph()
 					if (fWalkFailed)
 					{
 
-						//pTempPool[ pSrcNode->m_iFirstLink + j ] = pTempPool [ pSrcNode->m_iFirstLink + ( pSrcNode->m_cNumLinks - 1 ) ];
+						// pTempPool[ pSrcNode->m_iFirstLink + j ] = pTempPool [ pSrcNode->m_iFirstLink + ( pSrcNode->m_cNumLinks - 1 ) ];
 
 						// now me must eliminate the hull that couldn't walk this connection
 						switch (hull)
 						{
 						case NODE_SMALL_HULL: // if this hull can't fit, nothing can, so drop the connection
-							file.Printf("NODE_SMALL_HULL step %d\n", step);
+							fprintf(file, "NODE_SMALL_HULL step %d\n", step);
 							pTempPool[pSrcNode->m_iFirstLink + j].m_afLinkInfo &= ~(bits_LINK_SMALL_HULL | bits_LINK_HUMAN_HULL | bits_LINK_LARGE_HULL);
 							fSkipRemainingHulls = true; // don't bother checking larger hulls
 							break;
 						case NODE_HUMAN_HULL:
-							file.Printf("NODE_HUMAN_HULL step %d\n", step);
+							fprintf(file, "NODE_HUMAN_HULL step %d\n", step);
 							pTempPool[pSrcNode->m_iFirstLink + j].m_afLinkInfo &= ~(bits_LINK_HUMAN_HULL | bits_LINK_LARGE_HULL);
 							fSkipRemainingHulls = true; // don't bother checking larger hulls
 							break;
 						case NODE_LARGE_HULL:
-							file.Printf("NODE_LARGE_HULL step %d\n", step);
+							fprintf(file, "NODE_LARGE_HULL step %d\n", step);
 							pTempPool[pSrcNode->m_iFirstLink + j].m_afLinkInfo &= ~bits_LINK_LARGE_HULL;
 							break;
 						}
@@ -1925,7 +1953,7 @@ void CTestHull::BuildNodeGraph()
 					TraceResult tr;
 
 					UTIL_TraceHull(pSrcNode->m_vecOrigin + Vector(0, 0, 32), pDestNode->m_vecOriginPeek + Vector(0, 0, 32), ignore_monsters, large_hull, ENT(pev), &tr);
-					if (0 != tr.fStartSolid || tr.flFraction < 1.0)
+					if (tr.fStartSolid || tr.flFraction < 1.0)
 					{
 						pTempPool[pSrcNode->m_iFirstLink + j].m_afLinkInfo &= ~bits_LINK_FLY_HULL;
 					}
@@ -1934,9 +1962,9 @@ void CTestHull::BuildNodeGraph()
 
 			if (pTempPool[pSrcNode->m_iFirstLink + j].m_afLinkInfo == 0)
 			{
-				file.Printf("Rejected Node %3d - Unreachable by ", pTempPool[pSrcNode->m_iFirstLink + j].m_iDestNode);
+				fprintf(file, "Rejected Node %3d - Unreachable by ", pTempPool[pSrcNode->m_iFirstLink + j].m_iDestNode);
 				pTempPool[pSrcNode->m_iFirstLink + j] = pTempPool[pSrcNode->m_iFirstLink + (pSrcNode->m_cNumLinks - 1)];
-				file.Printf("Any Hull\n");
+				fprintf(file, "Any Hull\n");
 
 				pSrcNode->m_cNumLinks--;
 				cPoolLinks--; // we just removed a link, so decrement the total number of links in the pool.
@@ -1944,7 +1972,7 @@ void CTestHull::BuildNodeGraph()
 			}
 		}
 	}
-	file.Printf("-------------------------------------------------------------------------------\n\n\n");
+	fprintf(file, "-------------------------------------------------------------------------------\n\n\n");
 
 	cPoolLinks -= WorldGraph.RejectInlineLinks(pTempPool, file);
 
@@ -1958,12 +1986,16 @@ void CTestHull::BuildNodeGraph()
 		{
 			free(pTempPool);
 		}
+		if (file)
+		{ // close the file
+			fclose(file);
+		}
 
 		return;
 	}
 	WorldGraph.m_cLinks = cPoolLinks;
 
-	//copy only the used portions of the TempPool into the graph's link pool
+	// copy only the used portions of the TempPool into the graph's link pool
 	int iFinalPoolIndex = 0;
 	int iOldFirstLink;
 
@@ -1990,8 +2022,8 @@ void CTestHull::BuildNodeGraph()
 
 	fPairsValid = true; // assume that the connection pairs are all valid to start
 
-	file.Printf("\n\n-------------------------------------------------------------------------------\n");
-	file.Printf("Link Pairings:\n");
+	fprintf(file, "\n\n-------------------------------------------------------------------------------\n");
+	fprintf(file, "Link Pairings:\n");
 
 	// link integrity check. The idea here is that if Node A links to Node B, node B should
 	// link to node A. If not, we have a situation that prevents us from using a basic
@@ -2005,7 +2037,7 @@ void CTestHull::BuildNodeGraph()
 			if (iLink < 0)
 			{
 				fPairsValid = false; // unmatched link pair.
-				file.Printf("WARNING: Node %3d does not connect back to Node %3d\n", WorldGraph.INodeLink(i, j), i);
+				fprintf(file, "WARNING: Node %3d does not connect back to Node %3d\n", WorldGraph.INodeLink(i, j), i);
 			}
 		}
 	}
@@ -2014,15 +2046,15 @@ void CTestHull::BuildNodeGraph()
 	// (in the find nearest line function)
 	if (fPairsValid)
 	{
-		file.Printf("\nAll Connections are Paired!\n");
+		fprintf(file, "\nAll Connections are Paired!\n");
 	}
 
-	file.Printf("-------------------------------------------------------------------------------\n");
-	file.Printf("\n\n-------------------------------------------------------------------------------\n");
-	file.Printf("Total Number of Connections in Pool: %d\n", cPoolLinks);
-	file.Printf("-------------------------------------------------------------------------------\n");
-	file.Printf("Connection Pool: %d bytes\n", sizeof(CLink) * cPoolLinks);
-	file.Printf("-------------------------------------------------------------------------------\n");
+	fprintf(file, "-------------------------------------------------------------------------------\n");
+	fprintf(file, "\n\n-------------------------------------------------------------------------------\n");
+	fprintf(file, "Total Number of Connections in Pool: %d\n", cPoolLinks);
+	fprintf(file, "-------------------------------------------------------------------------------\n");
+	fprintf(file, "Connection Pool: %d bytes\n", sizeof(CLink) * cPoolLinks);
+	fprintf(file, "-------------------------------------------------------------------------------\n");
 
 
 	ALERT(at_aiconsole, "%d Nodes, %d Connections\n", WorldGraph.m_cNodes, cPoolLinks);
@@ -2036,7 +2068,7 @@ void CTestHull::BuildNodeGraph()
 	//
 	for (i = 0; i < WorldGraph.m_cNodes; i++)
 	{
-		if ((WorldGraph.m_pNodes[i].m_afNodeInfo & bits_NODE_LAND) != 0)
+		if ((WorldGraph.m_pNodes[i].m_afNodeInfo & bits_NODE_LAND))
 		{
 			WorldGraph.m_pNodes[i].m_vecOrigin.z -= NODE_HEIGHT;
 		}
@@ -2048,20 +2080,23 @@ void CTestHull::BuildNodeGraph()
 		free(pTempPool);
 	}
 
-	file.Close();
+	if (file)
+	{
+		fclose(file);
+	}
 
 	// We now have some graphing capabilities.
 	//
-	WorldGraph.m_fGraphPresent = 1;		//graph is in memory.
-	WorldGraph.m_fGraphPointersSet = 1; // since the graph was generated, the pointers are ready
-	WorldGraph.m_fRoutingComplete = 0;	// Optimal routes aren't computed, yet.
+	WorldGraph.m_fGraphPresent = true;	   // graph is in memory.
+	WorldGraph.m_fGraphPointersSet = true; // since the graph was generated, the pointers are ready
+	WorldGraph.m_fRoutingComplete = false; // Optimal routes aren't computed, yet.
 
 	// Compute and compress the routing information.
 	//
 	WorldGraph.ComputeStaticRoutingTables();
 
 	// save the node graph for this level
-	WorldGraph.FSaveGraph(STRING(gpGlobals->mapname));
+	WorldGraph.FSaveGraph((char*)STRING(gpGlobals->mapname));
 	ALERT(at_console, "Done.\n");
 }
 
@@ -2069,14 +2104,14 @@ void CTestHull::BuildNodeGraph()
 //=========================================================
 // returns a hardcoded path.
 //=========================================================
-void CTestHull::PathFind()
+void CTestHull ::PathFind(void)
 {
 	int iPath[50];
 	int iPathSize;
 	int i;
 	CNode *pNode, *pNextNode;
 
-	if (0 == WorldGraph.m_fGraphPresent || 0 == WorldGraph.m_fGraphPointersSet)
+	if (!WorldGraph.m_fGraphPresent || !WorldGraph.m_fGraphPointersSet)
 	{ // protect us in the case that the node graph isn't available
 		ALERT(at_aiconsole, "Graph not ready!\n");
 		return;
@@ -2084,7 +2119,7 @@ void CTestHull::PathFind()
 
 	iPathSize = WorldGraph.FindShortestPath(iPath, 0, 19, 0, 0); // UNDONE use hull constant
 
-	if (0 == iPathSize)
+	if (!iPathSize)
 	{
 		ALERT(at_aiconsole, "No Path!\n");
 		return;
@@ -2119,7 +2154,7 @@ void CTestHull::PathFind()
 //=========================================================
 // CStack Constructor
 //=========================================================
-CStack::CStack()
+CStack ::CStack(void)
 {
 	m_level = 0;
 }
@@ -2127,7 +2162,7 @@ CStack::CStack()
 //=========================================================
 // pushes a value onto the stack
 //=========================================================
-void CStack::Push(int value)
+void CStack ::Push(int value)
 {
 	if (m_level >= MAX_STACK_NODES)
 	{
@@ -2141,7 +2176,7 @@ void CStack::Push(int value)
 //=========================================================
 // pops a value off of the stack
 //=========================================================
-int CStack::Pop()
+int CStack ::Pop(void)
 {
 	if (m_level <= 0)
 		return -1;
@@ -2153,7 +2188,7 @@ int CStack::Pop()
 //=========================================================
 // returns the value on the top of the stack
 //=========================================================
-int CStack::Top()
+int CStack ::Top(void)
 {
 	return m_stack[m_level - 1];
 }
@@ -2161,7 +2196,7 @@ int CStack::Top()
 //=========================================================
 // copies every element on the stack into an array LIFO
 //=========================================================
-void CStack::CopyToArray(int* piArray)
+void CStack ::CopyToArray(int* piArray)
 {
 	int i;
 
@@ -2174,7 +2209,7 @@ void CStack::CopyToArray(int* piArray)
 //=========================================================
 // CQueue constructor
 //=========================================================
-CQueue::CQueue()
+CQueue ::CQueue(void)
 {
 	m_cSize = 0;
 	m_head = 0;
@@ -2184,7 +2219,7 @@ CQueue::CQueue()
 //=========================================================
 // inserts a value into the queue
 //=========================================================
-void CQueue::Insert(int iValue, float fPriority)
+void CQueue ::Insert(int iValue, float fPriority)
 {
 
 	if (Full())
@@ -2196,7 +2231,7 @@ void CQueue::Insert(int iValue, float fPriority)
 	m_tail++;
 
 	if (m_tail == MAX_STACK_NODES)
-	{ //wrap around
+	{ // wrap around
 		m_tail = 0;
 	}
 
@@ -2208,7 +2243,7 @@ void CQueue::Insert(int iValue, float fPriority)
 //=========================================================
 // removes a value from the queue (FIFO)
 //=========================================================
-int CQueue::Remove(float& fPriority)
+int CQueue ::Remove(float& fPriority)
 {
 	if (m_head == MAX_STACK_NODES)
 	{ // wrap
@@ -2223,7 +2258,7 @@ int CQueue::Remove(float& fPriority)
 //=========================================================
 // CQueue constructor
 //=========================================================
-CQueuePriority::CQueuePriority()
+CQueuePriority ::CQueuePriority(void)
 {
 	m_cSize = 0;
 }
@@ -2231,7 +2266,7 @@ CQueuePriority::CQueuePriority()
 //=========================================================
 // inserts a value into the priority queue
 //=========================================================
-void CQueuePriority::Insert(int iValue, float fPriority)
+void CQueuePriority ::Insert(int iValue, float fPriority)
 {
 
 	if (Full())
@@ -2250,7 +2285,7 @@ void CQueuePriority::Insert(int iValue, float fPriority)
 // removes the smallest item from the priority queue
 //
 //=========================================================
-int CQueuePriority::Remove(float& fPriority)
+int CQueuePriority ::Remove(float& fPriority)
 {
 	int iReturn = m_heap[0].Id;
 	fPriority = m_heap[0].Priority;
@@ -2294,10 +2329,10 @@ void CQueuePriority::Heap_SiftDown(int iSubRoot)
 	m_heap[parent] = Ref;
 }
 
-void CQueuePriority::Heap_SiftUp()
+void CQueuePriority::Heap_SiftUp(void)
 {
 	int child = m_cSize - 1;
-	while (0 != child)
+	while (child)
 	{
 		int parent = HEAP_PARENT(child);
 		if (m_heap[parent].Priority <= m_heap[child].Priority)
@@ -2318,224 +2353,250 @@ void CQueuePriority::Heap_SiftUp()
 // will be loaded. If file cannot be loaded, the node tree
 // will be created and saved to disk.
 //=========================================================
-bool CGraph::FLoadGraph(const char* szMapName)
+bool CGraph ::FLoadGraph(const char* szMapName)
 {
-	// make sure the directories have been made
-	g_pFileSystem->CreateDirHierarchy("maps/graphs", "GAMECONFIG");
-
-	const std::string fileName{std::string{"maps/graphs/"} + szMapName + ".nod"};
-
-	//Note: Allow loading graphs only from the mod directory itself.
-	//Do not allow loading from other games since they may have a different graph format.
-	const auto buffer = FileSystem_LoadFileIntoBuffer(fileName.c_str(), FileContentFormat::Binary, "GAMECONFIG");
-
-	if (buffer.empty())
-	{
-		return false;
-	}
-
-	auto pMemFile = reinterpret_cast<const byte*>(buffer.data());
-
-	assert(buffer.size() <= static_cast<std::size_t>(std::numeric_limits<int>::max()));
-	int length = static_cast<int>(buffer.size());
-
-	// Read the graph version number
-	//
-	length -= sizeof(int);
-	if (length < 0)
-		return false;
-
+	char szFilename[MAX_PATH];
 	int iVersion;
-	memcpy(&iVersion, pMemFile, sizeof(int));
-	pMemFile += sizeof(int);
+	int length;
+	byte* aMemFile;
+	byte* pMemFile;
 
-	if (iVersion != GRAPH_VERSION)
+	// make sure the directories have been made
+	char szDirName[MAX_PATH];
+	GET_GAME_DIR(szDirName);
+	strcat(szDirName, "/maps");
+	CreateDirectory(szDirName, NULL);
+	strcat(szDirName, "/graphs");
+	CreateDirectory(szDirName, NULL);
+
+	strcpy(szFilename, "maps/graphs/");
+	strcat(szFilename, szMapName);
+	strcat(szFilename, ".nod");
+
+	pMemFile = aMemFile = LOAD_FILE_FOR_ME(szFilename, &length);
+
+	if (!aMemFile)
 	{
-		// This file was written by a different build of the dll!
+		return false;
+	}
+	else
+	{
+		// Read the graph version number
 		//
-		ALERT(at_aiconsole, "**ERROR** Graph version is %d, expected %d\n", iVersion, GRAPH_VERSION);
-		return false;
+		length -= sizeof(int);
+		if (length < 0)
+			goto ShortFile;
+		memcpy(&iVersion, pMemFile, sizeof(int));
+		pMemFile += sizeof(int);
+
+		if (iVersion != GRAPH_VERSION)
+		{
+			// This file was written by a different build of the dll!
+			//
+			ALERT(at_aiconsole, "**ERROR** Graph version is %d, expected %d\n", iVersion, GRAPH_VERSION);
+			goto ShortFile;
+		}
+
+		// Read the graph class
+		//
+		length -= sizeof(CGraph);
+		if (length < 0)
+			goto ShortFile;
+		memcpy(this, pMemFile, sizeof(CGraph));
+		pMemFile += sizeof(CGraph);
+
+		// Set the pointers to zero, just in case we run out of memory.
+		//
+		m_pNodes = NULL;
+		m_pLinkPool = NULL;
+		m_di = NULL;
+		m_pRouteInfo = NULL;
+		m_pHashLinks = NULL;
+
+
+		// Malloc for the nodes
+		//
+		m_pNodes = (CNode*)calloc(sizeof(CNode), m_cNodes);
+
+		if (!m_pNodes)
+		{
+			ALERT(at_aiconsole, "**ERROR**\nCouldn't malloc %d nodes!\n", m_cNodes);
+			goto NoMemory;
+		}
+
+		// Read in all the nodes
+		//
+		length -= sizeof(CNode) * m_cNodes;
+		if (length < 0)
+			goto ShortFile;
+		memcpy(m_pNodes, pMemFile, sizeof(CNode) * m_cNodes);
+		pMemFile += sizeof(CNode) * m_cNodes;
+
+
+		// Malloc for the link pool
+		//
+		m_pLinkPool = (CLink*)calloc(sizeof(CLink), m_cLinks);
+
+		if (!m_pLinkPool)
+		{
+			ALERT(at_aiconsole, "**ERROR**\nCouldn't malloc %d link!\n", m_cLinks);
+			goto NoMemory;
+		}
+
+		// Read in all the links
+		//
+		length -= sizeof(CLink) * m_cLinks;
+		if (length < 0)
+			goto ShortFile;
+		memcpy(m_pLinkPool, pMemFile, sizeof(CLink) * m_cLinks);
+		pMemFile += sizeof(CLink) * m_cLinks;
+
+		// Malloc for the sorting info.
+		//
+		m_di = (DIST_INFO*)calloc(sizeof(DIST_INFO), m_cNodes);
+		if (!m_di)
+		{
+			ALERT(at_aiconsole, "***ERROR**\nCouldn't malloc %d entries sorting nodes!\n", m_cNodes);
+			goto NoMemory;
+		}
+
+		// Read it in.
+		//
+		length -= sizeof(DIST_INFO) * m_cNodes;
+		if (length < 0)
+			goto ShortFile;
+		memcpy(m_di, pMemFile, sizeof(DIST_INFO) * m_cNodes);
+		pMemFile += sizeof(DIST_INFO) * m_cNodes;
+
+		// Malloc for the routing info.
+		//
+		m_fRoutingComplete = false;
+		m_pRouteInfo = (char*)calloc(sizeof(char), m_nRouteInfo);
+		if (!m_pRouteInfo)
+		{
+			ALERT(at_aiconsole, "***ERROR**\nCounldn't malloc %d route bytes!\n", m_nRouteInfo);
+			goto NoMemory;
+		}
+		m_CheckedCounter = 0;
+		for (int i = 0; i < m_cNodes; i++)
+		{
+			m_di[i].m_CheckedEvent = 0;
+		}
+
+		// Read in the route information.
+		//
+		length -= sizeof(char) * m_nRouteInfo;
+		if (length < 0)
+			goto ShortFile;
+		memcpy(m_pRouteInfo, pMemFile, sizeof(char) * m_nRouteInfo);
+		pMemFile += sizeof(char) * m_nRouteInfo;
+		m_fRoutingComplete = true;
+		;
+
+		// malloc for the hash links
+		//
+		m_pHashLinks = (short*)calloc(sizeof(short), m_nHashLinks);
+		if (!m_pHashLinks)
+		{
+			ALERT(at_aiconsole, "***ERROR**\nCounldn't malloc %d hash link bytes!\n", m_nHashLinks);
+			goto NoMemory;
+		}
+
+		// Read in the hash link information
+		//
+		length -= sizeof(short) * m_nHashLinks;
+		if (length < 0)
+			goto ShortFile;
+		memcpy(m_pHashLinks, pMemFile, sizeof(short) * m_nHashLinks);
+		pMemFile += sizeof(short) * m_nHashLinks;
+
+		// Set the graph present flag, clear the pointers set flag
+		//
+		m_fGraphPresent = true;
+		m_fGraphPointersSet = false;
+
+		FREE_FILE(aMemFile);
+
+		if (length != 0)
+		{
+			ALERT(at_aiconsole, "***WARNING***:Node graph was longer than expected by %d bytes.!\n", length);
+		}
+
+		return true;
 	}
 
-	// Read the graph class
-	//
-	length -= sizeof(CGraph);
-	if (length < 0)
-		return false;
-	memcpy(this, pMemFile, sizeof(CGraph));
-	pMemFile += sizeof(CGraph);
-
-	// Set the pointers to zero, just in case we run out of memory.
-	//
-	m_pNodes = NULL;
-	m_pLinkPool = NULL;
-	m_di = NULL;
-	m_pRouteInfo = NULL;
-	m_pHashLinks = NULL;
-
-
-	// Malloc for the nodes
-	//
-	m_pNodes = (CNode*)calloc(sizeof(CNode), m_cNodes);
-
-	if (!m_pNodes)
-	{
-		ALERT(at_aiconsole, "**ERROR**\nCouldn't malloc %d nodes!\n", m_cNodes);
-		return false;
-	}
-
-	// Read in all the nodes
-	//
-	length -= sizeof(CNode) * m_cNodes;
-	if (length < 0)
-		return false;
-	memcpy(m_pNodes, pMemFile, sizeof(CNode) * m_cNodes);
-	pMemFile += sizeof(CNode) * m_cNodes;
-
-
-	// Malloc for the link pool
-	//
-	m_pLinkPool = (CLink*)calloc(sizeof(CLink), m_cLinks);
-
-	if (!m_pLinkPool)
-	{
-		ALERT(at_aiconsole, "**ERROR**\nCouldn't malloc %d link!\n", m_cLinks);
-		return false;
-	}
-
-	// Read in all the links
-	//
-	length -= sizeof(CLink) * m_cLinks;
-	if (length < 0)
-		return false;
-	memcpy(m_pLinkPool, pMemFile, sizeof(CLink) * m_cLinks);
-	pMemFile += sizeof(CLink) * m_cLinks;
-
-	// Malloc for the sorting info.
-	//
-	m_di = (DIST_INFO*)calloc(sizeof(DIST_INFO), m_cNodes);
-	if (!m_di)
-	{
-		ALERT(at_aiconsole, "***ERROR**\nCouldn't malloc %d entries sorting nodes!\n", m_cNodes);
-		return false;
-	}
-
-	// Read it in.
-	//
-	length -= sizeof(DIST_INFO) * m_cNodes;
-	if (length < 0)
-		return false;
-	memcpy(m_di, pMemFile, sizeof(DIST_INFO) * m_cNodes);
-	pMemFile += sizeof(DIST_INFO) * m_cNodes;
-
-	// Malloc for the routing info.
-	//
-	m_fRoutingComplete = 0;
-	m_pRouteInfo = (char*)calloc(sizeof(char), m_nRouteInfo);
-	if (!m_pRouteInfo)
-	{
-		ALERT(at_aiconsole, "***ERROR**\nCounldn't malloc %d route bytes!\n", m_nRouteInfo);
-		return false;
-	}
-	m_CheckedCounter = 0;
-	for (int i = 0; i < m_cNodes; i++)
-	{
-		m_di[i].m_CheckedEvent = 0;
-	}
-
-	// Read in the route information.
-	//
-	length -= sizeof(char) * m_nRouteInfo;
-	if (length < 0)
-		return false;
-	memcpy(m_pRouteInfo, pMemFile, sizeof(char) * m_nRouteInfo);
-	pMemFile += sizeof(char) * m_nRouteInfo;
-	m_fRoutingComplete = 1;
-
-	// malloc for the hash links
-	//
-	m_pHashLinks = (short*)calloc(sizeof(short), m_nHashLinks);
-	if (!m_pHashLinks)
-	{
-		ALERT(at_aiconsole, "***ERROR**\nCounldn't malloc %d hash link bytes!\n", m_nHashLinks);
-		return false;
-	}
-
-	// Read in the hash link information
-	//
-	length -= sizeof(short) * m_nHashLinks;
-	if (length < 0)
-		return false;
-	memcpy(m_pHashLinks, pMemFile, sizeof(short) * m_nHashLinks);
-	pMemFile += sizeof(short) * m_nHashLinks;
-
-	// Set the graph present flag, clear the pointers set flag
-	//
-	m_fGraphPresent = 1;
-	m_fGraphPointersSet = 0;
-
-	if (length != 0)
-	{
-		ALERT(at_aiconsole, "***WARNING***:Node graph was longer than expected by %d bytes.!\n", length);
-	}
-
-	return true;
+ShortFile:
+NoMemory:
+	FREE_FILE(aMemFile);
+	return false;
 }
 
 //=========================================================
 // CGraph - FSaveGraph - It's not rocket science.
 // this WILL overwrite existing files.
 //=========================================================
-bool CGraph::FSaveGraph(const char* szMapName)
+bool CGraph ::FSaveGraph(const char* szMapName)
 {
-	if (0 == m_fGraphPresent || 0 == m_fGraphPointersSet)
+	int iVersion = GRAPH_VERSION;
+	char szFilename[MAX_PATH];
+	FILE* file;
+
+	if (!m_fGraphPresent || !m_fGraphPointersSet)
 	{ // protect us in the case that the node graph isn't available or built
 		ALERT(at_aiconsole, "Graph not ready!\n");
 		return false;
 	}
 
 	// make sure directories have been made
-	g_pFileSystem->CreateDirHierarchy("maps/graphs", "GAMECONFIG");
+	GET_GAME_DIR(szFilename);
+	strcat(szFilename, "/maps");
+	CreateDirectory(szFilename, NULL);
+	strcat(szFilename, "/graphs");
+	CreateDirectory(szFilename, NULL);
 
-	const std::string fileName{std::string{"maps/graphs/"} + szMapName + ".nod"};
+	strcat(szFilename, "/");
+	strcat(szFilename, szMapName);
+	strcat(szFilename, ".nod");
 
-	FSFile file{fileName.c_str(), "wb", "GAMECONFIG"};
+	file = fopen(szFilename, "wb");
 
-	ALERT(at_aiconsole, "Created: %s\n", fileName.c_str());
+	ALERT(at_aiconsole, "Created: %s\n", szFilename);
 
 	if (!file)
 	{ // couldn't create
-		ALERT(at_aiconsole, "Couldn't Create: %s\n", fileName.c_str());
+		ALERT(at_aiconsole, "Couldn't Create: %s\n", szFilename);
 		return false;
 	}
-
-	// write the version
-	const int iVersion = GRAPH_VERSION;
-	file.Write(&iVersion, sizeof(int));
-
-	// write the CGraph class
-	file.Write(this, sizeof(CGraph));
-
-	// write the nodes
-	file.Write(m_pNodes, sizeof(CNode) * m_cNodes);
-
-	// write the links
-	file.Write(m_pLinkPool, sizeof(CLink) * m_cLinks);
-
-	file.Write(m_di, sizeof(DIST_INFO) * m_cNodes);
-
-	// Write the route info.
-	//
-	if (m_pRouteInfo && 0 != m_nRouteInfo)
+	else
 	{
-		file.Write(m_pRouteInfo, sizeof(char) * m_nRouteInfo);
-	}
+		// write the version
+		fwrite(&iVersion, sizeof(int), 1, file);
 
-	if (m_pHashLinks && 0 != m_nHashLinks)
-	{
-		file.Write(m_pHashLinks, sizeof(short) * m_nHashLinks);
+		// write the CGraph class
+		fwrite(this, sizeof(CGraph), 1, file);
+
+		// write the nodes
+		fwrite(m_pNodes, sizeof(CNode), m_cNodes, file);
+
+		// write the links
+		fwrite(m_pLinkPool, sizeof(CLink), m_cLinks, file);
+
+		fwrite(m_di, sizeof(DIST_INFO), m_cNodes, file);
+
+		// Write the route info.
+		//
+		if (m_pRouteInfo && m_nRouteInfo)
+		{
+			fwrite(m_pRouteInfo, sizeof(char), m_nRouteInfo, file);
+		}
+
+		if (m_pHashLinks && m_nHashLinks)
+		{
+			fwrite(m_pHashLinks, sizeof(short), m_nHashLinks, file);
+		}
+		fclose(file);
+		return true;
 	}
-	return true;
 }
 
 //=========================================================
@@ -2545,7 +2606,7 @@ bool CGraph::FSaveGraph(const char* szMapName)
 // this is done after loading the graph from disk, whereupon
 // the pointers are not valid.
 //=========================================================
-bool CGraph::FSetGraphPointers()
+bool CGraph ::FSetGraphPointers(void)
 {
 	int i;
 	edict_t* pentLinkEnt;
@@ -2585,7 +2646,7 @@ bool CGraph::FSetGraphPointers()
 	}
 
 	// the pointers are now set.
-	m_fGraphPointersSet = 1;
+	m_fGraphPointersSet = true;
 	return true;
 }
 
@@ -2604,15 +2665,26 @@ bool CGraph::FSetGraphPointers()
 // though. ( I now suspect that we are getting GMT back from
 // these functions and must compensate for local time ) (sjb)
 //=========================================================
-bool CGraph::CheckNODFile(const char* szMapName)
+bool CGraph ::CheckNODFile(const char* szMapName)
 {
-	const std::string bspFileName{std::string{"maps/"} + szMapName + ".bsp"};
-	const std::string graphFileName{std::string{"maps/graphs/"} + szMapName + ".nod"};
+	int retValue;
 
-	bool retValue = true;
+	char szBspFilename[MAX_PATH];
+	char szGraphFilename[MAX_PATH];
+
+
+	strcpy(szBspFilename, "maps/");
+	strcat(szBspFilename, szMapName);
+	strcat(szBspFilename, ".bsp");
+
+	strcpy(szGraphFilename, "maps/graphs/");
+	strcat(szGraphFilename, szMapName);
+	strcat(szGraphFilename, ".nod");
+
+	retValue = true;
 
 	int iCompare;
-	if (COMPARE_FILE_TIME(bspFileName.c_str(), graphFileName.c_str(), &iCompare))
+	if (COMPARE_FILE_TIME(szBspFilename, szGraphFilename, &iCompare))
 	{
 		if (iCompare > 0)
 		{ // BSP file is newer.
@@ -2716,8 +2788,7 @@ void CGraph::HashChoosePrimes(int TableSize)
 	// We divide this interval into 16 equal sized zones. We want to find
 	// one prime number that best represents that zone.
 	//
-	int iPrime, iZone;
-	for (iZone = 1, iPrime = 0; iPrime < 16; iZone += Spacing)
+	for (int iZone = 1, iPrime = 0; iPrime < 16; iZone += Spacing)
 	{
 		// Search for a prime number that is less than the target zone
 		// number given by iZone.
@@ -2748,7 +2819,7 @@ void CGraph::HashChoosePrimes(int TableSize)
 
 	// Alternate negative and positive numbers
 	//
-	for (iPrime = 0; iPrime < 16; iPrime += 2)
+	for (int iPrime = 0; iPrime < 16; iPrime += 2)
 	{
 		m_HashPrimes[iPrime] = TableSize - m_HashPrimes[iPrime];
 	}
@@ -2756,7 +2827,7 @@ void CGraph::HashChoosePrimes(int TableSize)
 	// Shuffle the set of primes to reduce correlation with bits in
 	// hash key.
 	//
-	for (iPrime = 0; iPrime < 16 - 1; iPrime++)
+	for (int iPrime = 0; iPrime < 16 - 1; iPrime++)
 	{
 		int Pick = RANDOM_LONG(0, 15 - iPrime);
 		int Temp = m_HashPrimes[Pick];
@@ -2768,22 +2839,20 @@ void CGraph::HashChoosePrimes(int TableSize)
 // Renumber nodes so that nodes that link together are together.
 //
 #define UNNUMBERED_NODE -1
-void CGraph::SortNodes()
+void CGraph::SortNodes(void)
 {
 	// We are using m_iPreviousNode to be the new node number.
 	// After assigning new node numbers to everything, we move
 	// things and patchup the links.
 	//
 	int iNodeCnt = 0;
-	int i;
 	m_pNodes[0].m_iPreviousNode = iNodeCnt++;
-
-	for (i = 1; i < m_cNodes; i++)
+	for (int i = 1; i < m_cNodes; i++)
 	{
 		m_pNodes[i].m_iPreviousNode = UNNUMBERED_NODE;
 	}
 
-	for (i = 0; i < m_cNodes; i++)
+	for (int i = 0; i < m_cNodes; i++)
 	{
 		// Run through all of this node's neighbors
 		//
@@ -2799,7 +2868,7 @@ void CGraph::SortNodes()
 
 	// Assign remaining node numbers to unlinked nodes.
 	//
-	for (i = 0; i < m_cNodes; i++)
+	for (int i = 0; i < m_cNodes; i++)
 	{
 		if (m_pNodes[i].m_iPreviousNode == UNNUMBERED_NODE)
 		{
@@ -2809,7 +2878,7 @@ void CGraph::SortNodes()
 
 	// Alter links to reflect new node numbers.
 	//
-	for (i = 0; i < m_cLinks; i++)
+	for (int i = 0; i < m_cLinks; i++)
 	{
 		m_pLinkPool[i].m_iSrcNode = m_pNodes[m_pLinkPool[i].m_iSrcNode].m_iPreviousNode;
 		m_pLinkPool[i].m_iDestNode = m_pNodes[m_pLinkPool[i].m_iDestNode].m_iPreviousNode;
@@ -2817,7 +2886,7 @@ void CGraph::SortNodes()
 
 	// Rearrange nodes to reflect new node numbering.
 	//
-	for (i = 0; i < m_cNodes; i++)
+	for (int i = 0; i < m_cNodes; i++)
 	{
 		while (m_pNodes[i].m_iPreviousNode != i)
 		{
@@ -2832,7 +2901,7 @@ void CGraph::SortNodes()
 	}
 }
 
-void CGraph::BuildLinkLookups()
+void CGraph::BuildLinkLookups(void)
 {
 	m_nHashLinks = 3 * m_cLinks / 2 + 3;
 
@@ -2843,19 +2912,18 @@ void CGraph::BuildLinkLookups()
 		ALERT(at_aiconsole, "Couldn't allocated Link Lookup Table.\n");
 		return;
 	}
-	int i;
-	for (i = 0; i < m_nHashLinks; i++)
+	for (int i = 0; i < m_nHashLinks; i++)
 	{
 		m_pHashLinks[i] = ENTRY_STATE_EMPTY;
 	}
 
-	for (i = 0; i < m_cLinks; i++)
+	for (int i = 0; i < m_cLinks; i++)
 	{
 		CLink& link = Link(i);
 		HashInsert(link.m_iSrcNode, link.m_iDestNode, i);
 	}
 #if 0
-	for (i = 0; i < m_cLinks; i++)
+	for (int i = 0; i < m_cLinks; i++)
 	{
 		CLink &link = Link(i);
 		int iKey;
@@ -2868,7 +2936,7 @@ void CGraph::BuildLinkLookups()
 #endif
 }
 
-void CGraph::BuildRegionTables()
+void CGraph::BuildRegionTables(void)
 {
 	if (m_di)
 		free(m_di);
@@ -2885,13 +2953,12 @@ void CGraph::BuildRegionTables()
 	// Calculate regions for all the nodes.
 	//
 	//
-	int i;
-	for (i = 0; i < 3; i++)
+	for (int i = 0; i < 3; i++)
 	{
 		m_RegionMin[i] = 999999999.0;  // just a big number out there;
 		m_RegionMax[i] = -999999999.0; // just a big number out there;
 	}
-	for (i = 0; i < m_cNodes; i++)
+	for (int i = 0; i < m_cNodes; i++)
 	{
 		if (m_pNodes[i].m_vecOrigin.x < m_RegionMin[0])
 			m_RegionMin[0] = m_pNodes[i].m_vecOrigin.x;
@@ -2907,27 +2974,26 @@ void CGraph::BuildRegionTables()
 		if (m_pNodes[i].m_vecOrigin.z > m_RegionMax[2])
 			m_RegionMax[2] = m_pNodes[i].m_vecOrigin.z;
 	}
-	for (i = 0; i < m_cNodes; i++)
+	for (int i = 0; i < m_cNodes; i++)
 	{
 		m_pNodes[i].m_Region[0] = CALC_RANGE(m_pNodes[i].m_vecOrigin.x, m_RegionMin[0], m_RegionMax[0]);
 		m_pNodes[i].m_Region[1] = CALC_RANGE(m_pNodes[i].m_vecOrigin.y, m_RegionMin[1], m_RegionMax[1]);
 		m_pNodes[i].m_Region[2] = CALC_RANGE(m_pNodes[i].m_vecOrigin.z, m_RegionMin[2], m_RegionMax[2]);
 	}
 
-	for (i = 0; i < 3; i++)
+	for (int i = 0; i < 3; i++)
 	{
-		int j;
-		for (j = 0; j < NUM_RANGES; j++)
+		for (int j = 0; j < NUM_RANGES; j++)
 		{
 			m_RangeStart[i][j] = 255;
 			m_RangeEnd[i][j] = 0;
 		}
-		for (j = 0; j < m_cNodes; j++)
+		for (int j = 0; j < m_cNodes; j++)
 		{
 			m_di[j].m_SortedBy[i] = j;
 		}
 
-		for (j = 0; j < m_cNodes - 1; j++)
+		for (int j = 0; j < m_cNodes - 1; j++)
 		{
 			int jNode = m_di[j].m_SortedBy[i];
 			int jCodeX = m_pNodes[jNode].m_Region[0];
@@ -2981,7 +3047,7 @@ void CGraph::BuildRegionTables()
 
 	// Generate lookup tables.
 	//
-	for (i = 0; i < m_cNodes; i++)
+	for (int i = 0; i < m_cNodes; i++)
 	{
 		int CodeX = m_pNodes[m_di[i].m_SortedBy[0]].m_Region[0];
 		int CodeY = m_pNodes[m_di[i].m_SortedBy[1]].m_Region[1];
@@ -3018,7 +3084,7 @@ void CGraph::BuildRegionTables()
 	memset(m_Cache, 0, sizeof(m_Cache));
 }
 
-void CGraph::ComputeStaticRoutingTables()
+void CGraph ::ComputeStaticRoutingTables(void)
 {
 	int nRoutes = m_cNodes * m_cNodes;
 #define FROM_TO(x, y) ((x)*m_cNodes + (y))
@@ -3051,8 +3117,7 @@ void CGraph::ComputeStaticRoutingTables()
 
 				// Initialize Routing table to uncalculated.
 				//
-				int iFrom;
-				for (iFrom = 0; iFrom < m_cNodes; iFrom++)
+				for (int iFrom = 0; iFrom < m_cNodes; iFrom++)
 				{
 					for (int iTo = 0; iTo < m_cNodes; iTo++)
 					{
@@ -3060,7 +3125,7 @@ void CGraph::ComputeStaticRoutingTables()
 					}
 				}
 
-				for (iFrom = 0; iFrom < m_cNodes; iFrom++)
+				for (int iFrom = 0; iFrom < m_cNodes; iFrom++)
 				{
 					for (int iTo = m_cNodes - 1; iTo >= 0; iTo--)
 					{
@@ -3109,7 +3174,7 @@ void CGraph::ComputeStaticRoutingTables()
 					}
 				}
 
-				for (iFrom = 0; iFrom < m_cNodes; iFrom++)
+				for (int iFrom = 0; iFrom < m_cNodes; iFrom++)
 				{
 					for (int iTo = 0; iTo < m_cNodes; iTo++)
 					{
@@ -3128,7 +3193,7 @@ void CGraph::ComputeStaticRoutingTables()
 						bool CanRepeat = ((BestNextNodes[i] == iLastNode) && cRepeats < 127);
 						bool CanSequence = (BestNextNodes[i] == i && cSequence < 128);
 
-						if (0 != cRepeats)
+						if (cRepeats)
 						{
 							if (CanRepeat)
 							{
@@ -3175,7 +3240,7 @@ void CGraph::ComputeStaticRoutingTables()
 								}
 							}
 						}
-						else if (0 != cSequence)
+						else if (cSequence)
 						{
 							if (CanSequence)
 							{
@@ -3225,7 +3290,7 @@ void CGraph::ComputeStaticRoutingTables()
 						}
 						iLastNode = BestNextNodes[i];
 					}
-					if (0 != cRepeats)
+					if (cRepeats)
 					{
 						// Emit the repeat phrase.
 						//
@@ -3256,7 +3321,7 @@ void CGraph::ComputeStaticRoutingTables()
 							ALERT(at_aiconsole, "Nodes need sorting (%d,%d)!\n", iLastNode, iFrom);
 						}
 					}
-					if (0 != cSequence)
+					if (cSequence)
 					{
 						// Emit the Sequence phrase.
 						//
@@ -3306,12 +3371,14 @@ void CGraph::ComputeStaticRoutingTables()
 		}
 		ALERT(at_aiconsole, "Size of Routes = %d\n", nTotalCompressedSize);
 	}
-
-	delete[] Routes;
-	delete[] BestNextNodes;
-	delete[] pRoute;
-	delete[] pMyPath;
-
+	if (Routes)
+		delete Routes;
+	if (BestNextNodes)
+		delete BestNextNodes;
+	if (pRoute)
+		delete pRoute;
+	if (pMyPath)
+		delete pMyPath;
 	Routes = 0;
 	BestNextNodes = 0;
 	pRoute = 0;
@@ -3320,12 +3387,12 @@ void CGraph::ComputeStaticRoutingTables()
 #if 0
 	TestRoutingTables();
 #endif
-	m_fRoutingComplete = 1;
+	m_fRoutingComplete = true;
 }
 
 // Test those routing tables. Doesn't really work, yet.
 //
-void CGraph::TestRoutingTables()
+void CGraph ::TestRoutingTables(void)
 {
 	int* pMyPath = new int[m_cNodes];
 	int* pMyPath2 = new int[m_cNodes];
@@ -3351,9 +3418,9 @@ void CGraph::TestRoutingTables()
 				{
 					for (int iTo = 0; iTo < m_cNodes; iTo++)
 					{
-						m_fRoutingComplete = 0;
+						m_fRoutingComplete = false;
 						int cPathSize1 = FindShortestPath(pMyPath, iFrom, iTo, iHull, iCapMask);
-						m_fRoutingComplete = 1;
+						m_fRoutingComplete = true;
 						int cPathSize2 = FindShortestPath(pMyPath2, iFrom, iTo, iHull, iCapMask);
 
 						// Unless we can look at the entire path, we can verify that it's correct.
@@ -3365,7 +3432,6 @@ void CGraph::TestRoutingTables()
 							//
 #if 1
 						float flDistance1 = 0.0;
-
 						for (int i = 0; i < cPathSize1 - 1; i++)
 						{
 							// Find the link from pMyPath[i] to pMyPath[i+1]
@@ -3432,9 +3498,9 @@ void CGraph::TestRoutingTables()
 								ALERT(at_aiconsole, "%d ", pMyPath2[i]);
 							}
 							ALERT(at_aiconsole, "\n");
-							m_fRoutingComplete = 0;
+							m_fRoutingComplete = false;
 							cPathSize1 = FindShortestPath(pMyPath, iFrom, iTo, iHull, iCapMask);
-							m_fRoutingComplete = 1;
+							m_fRoutingComplete = true;
 							cPathSize2 = FindShortestPath(pMyPath2, iFrom, iTo, iHull, iCapMask);
 							goto EnoughSaid;
 						}
@@ -3446,8 +3512,10 @@ void CGraph::TestRoutingTables()
 
 EnoughSaid:
 
-	delete[] pMyPath;
-	delete[] pMyPath2;
+	if (pMyPath)
+		delete pMyPath;
+	if (pMyPath2)
+		delete pMyPath2;
 	pMyPath = 0;
 	pMyPath2 = 0;
 }
@@ -3468,7 +3536,7 @@ EnoughSaid:
 class CNodeViewer : public CBaseEntity
 {
 public:
-	void Spawn() override;
+	void Spawn(void);
 
 	int m_iBaseNode;
 	int m_iDraw;
@@ -3481,7 +3549,7 @@ public:
 
 	void FindNodeConnections(int iNode);
 	void AddNode(int iFrom, int iTo);
-	void EXPORT DrawThink();
+	void EXPORT DrawThink(void);
 };
 LINK_ENTITY_TO_CLASS(node_viewer, CNodeViewer);
 LINK_ENTITY_TO_CLASS(node_viewer_human, CNodeViewer);
@@ -3490,7 +3558,7 @@ LINK_ENTITY_TO_CLASS(node_viewer_large, CNodeViewer);
 
 void CNodeViewer::Spawn()
 {
-	if (0 == WorldGraph.m_fGraphPresent || 0 == WorldGraph.m_fGraphPointersSet)
+	if (!WorldGraph.m_fGraphPresent || !WorldGraph.m_fGraphPointersSet)
 	{ // protect us in the case that the node graph isn't available or built
 		ALERT(at_console, "Graph not ready!\n");
 		UTIL_Remove(this);
@@ -3564,7 +3632,7 @@ void CNodeViewer::Spawn()
 }
 
 
-void CNodeViewer::FindNodeConnections(int iNode)
+void CNodeViewer ::FindNodeConnections(int iNode)
 {
 	AddNode(iNode, WorldGraph.NextNodeInRoute(iNode, m_iBaseNode, m_iHull, 0));
 	for (int i = 0; i < WorldGraph.m_pNodes[iNode].m_cNumLinks; i++)
@@ -3599,7 +3667,7 @@ void CNodeViewer::AddNode(int iFrom, int iTo)
 }
 
 
-void CNodeViewer::DrawThink()
+void CNodeViewer ::DrawThink(void)
 {
 	pev->nextthink = gpGlobals->time;
 

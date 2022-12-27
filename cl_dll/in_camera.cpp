@@ -16,8 +16,6 @@
 #include "in_defs.h"
 #include "Exports.h"
 
-#include "SDL2/SDL_mouse.h"
-
 float CL_KeyState(kbutton_t* key);
 
 extern cl_enginefunc_t gEngfuncs;
